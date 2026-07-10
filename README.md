@@ -65,10 +65,31 @@ Pipeline bao gồm 6 giai đoạn chính (bám sát Cell 30 của bài báo gố
 * **PM Gate:** Sau khi chạy Stage 01 trên Kaggle, gửi `q1_cache_meta.json` và `q1_cache_errors.csv` trước khi chạy Stage 03.
 * **Điều kiện PASS:** `pm_gate = PASS`, `error_rows = 0`, `ok_rows = N`, memmap bytes đúng `N * 3 * 224 * 224`.
 
-### [Stage 02] Baseline 1: Retrieval
-* **Notebook:** *(Chờ phát triển)*
-* **Nhiệm vụ:** Đánh giá Image-Text Alignment trước khi huấn luyện LLM thông qua tính toán tương đồng ngữ nghĩa.
-* **Đánh giá:** Nếu Recall@1 và MRR > Baseline, tiếp tục sang Generative.
+### [Stage 02] Baseline 1: 2.5D Retrieval / Image-Text Alignment
+* **Notebook chính Kaggle:** `scripts/02_retrieval_baseline_kaggle.ipynb`
+* **Script đồng bộ:** `scripts/02_retrieval_baseline_kaggle.py`
+* **Trạng thái:** ✅ Đã rewrite medical-grade theo Stage 00-01 cache `2757` cases.
+* **Nhiệm vụ:**
+  - Đọc Stage 01 cache đã PM Gate PASS: `q1_25d_uint8_224.memmap`, `q1_cache_index.csv`, `q1_clean_manifest_for_cache.csv`, `q1_cache_meta.json`.
+  - Kiểm chứng 2.5D image-text alignment bằng same-split paired image-to-text retrieval.
+  - Tạo train-gallery top-K retrieval cho Stage 05 RAG, nhưng không diễn giải validation/test → train là Recall exact vì split disjoint.
+  - Xuất audit tables cho split/no-leakage, source_part, section completeness, SUV/FDG, clinical keywords, duplicate report hash và full cache channel stats.
+* **Output bắt buộc:**
+  - `vimedpet_stage02_retrieval_outputs/stage02_config.json`
+  - `vimedpet_stage02_retrieval_outputs/stage02_input_audit.json`
+  - `vimedpet_stage02_retrieval_outputs/retrieval_metrics.json`
+  - `vimedpet_stage02_retrieval_outputs/retrieval_pm_gate.json`
+  - `vimedpet_stage02_retrieval_outputs/indices/faiss_train_text.index`
+  - `vimedpet_stage02_retrieval_outputs/embeddings/*_image_emb.npy`
+  - `vimedpet_stage02_retrieval_outputs/embeddings/*_text_emb.npy`
+  - `vimedpet_stage02_retrieval_outputs/validation_topk_retrieved.csv`
+  - `vimedpet_stage02_retrieval_outputs/test_topk_retrieved.csv`
+  - `vimedpet_stage02_retrieval_outputs/tables/*.csv`
+* **Đánh giá:** Same-split image-to-text `Recall@1`, `Recall@5`, `Recall@10`, `MRR`, random baseline, metrics by split/source_part, failure cases, BLEU/ROUGE/BERTScore chỉ dùng như text-similarity diagnostics.
+* **PM Gate:** `retrieval_pm_gate.json` phải đạt `PASS`; `stage02_input_audit.json` phải xác nhận Stage 01 PASS, `n_cases = 2757`, patient overlap zero, embeddings finite, FAISS index tồn tại.
+* **Kết luận Stage 02 sau PM Review:** PASS về pipeline/output integrity nhưng là **weak retrieval baseline**; exact Recall/MRR gần random. Không được diễn giải BLEU/ROUGE/BERTScore cao là bằng chứng image-grounded PET/CT reasoning.
+* **Stage 02 Fix/Audit Addendum:** Đã định lượng duplicate/near-duplicate/SUV outlier trong `vimedpet_stage02_exact_outputs/tables/stage02_engineer_loop/`: exact duplicate cross-split `3` groups / `8` cases; near-duplicate TF-IDF cosine `>=0.95` có `17` pairs, trong đó `8` cross-split; SUV `76.0` ở case `fcf882bc0dd1`, split train, source_part `PETCT_2023_2`.
+* **Lưu ý y tế:** 2.5D retrieval chỉ là baseline/sanity check. Không được kết luận mô hình hiểu PET/CT 3D hoặc SUV định lượng chỉ dựa trên CT central slice, PET MIP và overlay proxy.
 
 ### [Stage 03] Baseline 2: 2.5D Generative Decoder (Mistral-7B)
 * **Notebook chính Kaggle 14-16GB:** `scripts/03_mistral_7b_qlora_kaggle.ipynb`
@@ -76,8 +97,8 @@ Pipeline bao gồm 6 giai đoạn chính (bám sát Cell 30 của bài báo gố
 * **Trạng thái:** ✅ Nhánh QLoRA được thiết kế để giữ Mistral-7B theo bài gốc nhưng tránh OOM fp16.
 * **Nhiệm vụ:** Huấn luyện LLM sinh báo cáo dựa trên thông số hình ảnh 2.5D Stat.
 * **Input (Add Data trên Kaggle):** Output đã được PM duyệt từ Stage 01.
-* **Tham số quan trọng:** `MAX_SEQ_LENGTH = 512`, Mistral-7B-Instruct-v0.2, QLoRA 4-bit NF4, LoRA r=8, batch size 1.
-* **Đánh giá:** BLEU, ROUGE-L, Report2 Keyword F1, Section completeness, SUV mention rate.
+* **Tham số quan trọng:** `MAX_SEQ_LENGTH = 512`, Mistral-7B-Instruct-v0.2, QLoRA 4-bit NF4, LoRA r=8, dropout=0.10, batch size 1, grad accumulation 8, `NUM_EPOCHS=3`, `LEARNING_RATE=5e-5`.
+* **Đánh giá:** BLEU, ROUGE-L, BERTScore/multilingual embedding similarity, Report2 Keyword F1, Section completeness, SUV/FDG mention consistency, length ratio, short report rate. Bắt buộc báo duplicate-aware metrics: all-cases, exclude exact duplicate cross-split, và near-duplicate-flagged subsets.
 * **Training safety:** Loss bắt buộc mask phần prompt/instruction, chỉ học phần target report sau `[/INST]`.
 * **Output bắt buộc:**
   - `vimedpet_mistral_qlora_outputs/train_config.json`
@@ -87,7 +108,7 @@ Pipeline bao gồm 6 giai đoạn chính (bám sát Cell 30 của bài báo gố
   - `vimedpet_mistral_qlora_outputs/mistral_lora_adapter/adapter_config.json`
   - `vimedpet_mistral_qlora_outputs/mistral_lora_adapter/adapter_model.safetensors`
 * **PM Gate:** Gửi `train_config.json`, `eval_metrics.json`, 5-10 dòng mẫu từ `generated_reports.csv`, và log `train/val/test` trước Stage 04/05.
-* **Điều kiện review tối thiểu:** Notebook đọc được cache shape `(2729, 3, 224, 224)`, join đủ 2729 rows, load Mistral-7B ở 4-bit thành công, train smoke ít nhất 10 steps không OOM, output có đủ hai section `MÔ TẢ HÌNH ẢNH` và `NHẬN ĐỊNH KẾT QUẢ` ở mẫu sinh.
+* **Điều kiện review tối thiểu:** Notebook đọc được cache shape `(2757, 3, 224, 224)`, join đủ 2757 rows cho image/cache alignment, dùng `q1_generation_manifest.csv` `2729` rows cho supervised generation nếu yêu cầu đủ Findings/Impression, in rõ missing Findings/Impression table (`1` Findings missing, `27` Impression missing), load Mistral-7B ở 4-bit thành công, full train 3 epoch không OOM, có validation loss từng epoch, output có đủ hai section `MÔ TẢ HÌNH ẢNH` và `NHẬN ĐỊNH KẾT QUẢ`, `mean_pred_words` tăng rõ so với epoch 1, `suv_or_fdg_pred_rate` không còn gần 0, và Stage03 eval phải flag SUV outlier case `fcf882bc0dd1` / SUV `76.0` như text-level consistency case, không phải image SUV quantification.
 
 ### [Stage 04] Main Target: 3D Dual-Stream PET/CT Encoder
 * **Notebook:** *(Chờ phát triển)*
@@ -102,3 +123,153 @@ Pipeline bao gồm 6 giai đoạn chính (bám sát Cell 30 của bài báo gố
 ### [Stage 06] XAI: Interpretability
 * **Notebook:** *(Chờ phát triển)*
 * **Nhiệm vụ:** Chiết xuất bản đồ sự chú ý (Attention Heatmaps / Grad-CAM). Xác minh xem khi mô hình sinh ra từ "tổn thương ở phổi", Heatmap có thực sự focus vào phổi trên hình hay không.
+
+---
+
+## Decision Log — ViMed-PET/CT
+
+### 2026-07-10 — Ghi chú audit sau Stage 00-01 Cache Streaming
+
+*Cập nhật sau khi audit notebook `Mistral-7b/00-01-cache-streaming.ipynb` và output `Mistral-7b/00_01_cache_streaming`.*
+
+#### Context
+
+- Notebook đã audit: `Mistral-7b/00-01-cache-streaming.ipynb`.
+- Thư mục output đã audit: `Mistral-7b/00_01_cache_streaming`.
+- Kết quả tổng quát: Stage 00-01 đã hoàn tất cache cho `2757` paired PET/CT-report cases; Stage 01 PM Gate đạt `PASS`.
+
+#### Kết quả Stage 00-01 hiện tại
+
+- Stage 00-01 đã tạo đủ `2757` paired PET/CT-report cases.
+- Stage 01 cache hoàn tất với `2757 / 2757` rows, `error_rows = 0`, `pm_gate = PASS`.
+- Cache shape hiện tại là `(2757, 3, 224, 224)` với dtype `uint8`.
+- Generation-ready subset hiện tại là khoảng `2729` cases do có `27` cases thiếu Impression và `1` case thiếu Findings.
+- Phải phân biệt rõ hai manifest cho các mục đích khác nhau:
+  - `q1_clean_manifest_for_cache.csv`: dùng cho image/cache alignment và Stage 02 retrieval, phạm vi `2757` cases.
+  - `q1_generation_manifest.csv`: dùng cho supervised generation Stage 03 nếu yêu cầu đủ Findings/Impression, phạm vi khoảng `2729` cases.
+
+#### Split audit note — patient-level split và no-leakage
+
+- Split hiện tại theo case:
+  - Train: `1930` cases, khoảng `70.0036%`.
+  - Validation: `414` cases, khoảng `15.0163%`.
+  - Test: `413` cases, khoảng `14.9801%`.
+- Split dùng `stable_patient_group = source_part + patient_key` để tránh leakage, vì `patient_key` là local ID và có thể bị reuse giữa các `source_part`.
+- Overlap theo `stable_patient_group`:
+  - Train/validation: `0`.
+  - Train/test: `0`.
+  - Validation/test: `0`.
+- Stable patient group overlap matrix bằng `0` giữa train/validation/test.
+- Diagnostic audit bằng `patient_key` đơn lẻ có thể xuất hiện overlap vì patient IDs là local/reused across source_part; không được diễn giải overlap này là true patient leakage nếu chưa có global patient identifier.
+- Nếu sau này tìm được global patient identifier chính thức, phải audit lại split theo global ID.
+
+#### Các audit bắt buộc cần bổ sung trước khi đưa ra kết luận lâm sàng
+
+##### SUV audit required
+
+Trước khi kết luận clinical consistency hoặc viết báo cáo y tế, cần bổ sung các bảng sau:
+
+- `SUV count by source_part`.
+- `SUV count by split`.
+- `SUV value distribution by source_part`.
+- `SUV outlier table`, đặc biệt cần review kỹ trường hợp `SUV max = 76.0`.
+
+Lý do: SUV là chỉ số định lượng quan trọng trong PET/CT. Nếu SUV distribution lệch giữa split/source_part hoặc regex parse nhầm số, metric Stage 03/04 có thể bị sai về mặt lâm sàng.
+
+##### Stage 04 3D readiness notes
+
+Hiện Stage 00-01 chưa có đủ thông tin cho kết luận 3D physical-space chuẩn y tế:
+
+- Output hiện tại chưa có full depth distribution: `min/p25/p50/p75/max` theo split và source_part.
+- Dữ liệu hiện tại là `.npy`; output Stage 00-01 chưa có DICOM/NIfTI physical metadata.
+- Metadata vật lý còn thiếu gồm: spacing, origin, orientation, voxel spacing, z-spacing.
+- Stage 04 3D dual-stream PET/CT phải audit depth normalization/patch sampling trước.
+- Stage 04 không được tuyên bố physical-space correctness nếu chưa có metadata validation cho spacing/origin/orientation/voxel spacing.
+- Nếu dataset không cung cấp metadata vật lý, phải ghi rõ limitation trong báo cáo nghiên cứu.
+
+##### 2.5D cache limitations
+
+2.5D cache hiện tại đúng cho Stage 02 retrieval baseline, nhưng có các giới hạn y tế cần ghi rõ:
+
+- CT central slice chỉ là một lát giữa thân, có thể bỏ sót tổn thương ở vùng cổ, ngực, bụng, chậu hoặc các vùng rìa của axial volume.
+- PET MIP giữ được projection uptake toàn thân nhưng làm mất định vị 3D.
+- Overlay proxy không phải là PET/CT fusion representation đã được chuẩn hóa lâm sàng.
+- Robust percentile normalization làm mất absolute SUV scale từ image representation.
+- Cách biểu diễn này chấp nhận được cho Stage 02 retrieval baseline, nhưng dự án không được kết luận rằng mô hình đã hiểu sâu clinical reasoning PET/CT nếu chỉ dựa trên 2.5D cache.
+
+##### Stage 03 caution
+
+- Nếu Stage 03 sử dụng 2.5D cache này, mô hình có thể học report style tốt hơn là học lesion-level localization chính xác.
+- Clinical metrics phải được diễn giải thận trọng.
+- Stage 03 supervised generation nên dùng `q1_generation_manifest.csv`, trừ khi đã có explicit missing-section masking hoặc fallback logic cho các case thiếu Findings/Impression.
+
+##### CT/PET/channel stats cần bổ sung
+
+Output hiện có cache sample stats, nhưng để audit chặt hơn cần bổ sung full-cache stats:
+
+- Full channel stats toàn cache.
+- Channel stats by split.
+- Channel stats by source_part.
+- Blank hoặc near-blank image detection.
+- Low-contrast image detection.
+
+Các bảng đề xuất:
+
+- `full_cache_channel_stats.csv`.
+- `channel_stats_by_split.csv`.
+- `channel_stats_by_source_part.csv`.
+- `blank_image_review.csv`.
+- `low_contrast_review.csv`.
+
+##### Additional missing metrics vs research timeline
+
+Các follow-up audits bắt buộc:
+
+- Sex/age/indication/history distribution.
+- Full channel stats over the entire cache, không chỉ sample stats.
+- Duplicate và near-duplicate text leakage audit.
+- SUV/FDG by split và source_part.
+- Parser warning categories và missing-section classification.
+- Section-level word count riêng cho Findings và Impression.
+- Physical metadata readiness cho Stage 04 3D.
+
+#### Các chỉ số còn thiếu so với timeline nghiên cứu
+
+##### Mức A — Bắt buộc trước khi chốt Stage 02/03 metric
+
+- Sex distribution by split/source_part.
+- Age hoặc birth_year distribution và missingness.
+- Indication completeness by split/source_part.
+- Clinical history completeness by split/source_part.
+- SUV/FDG by split/source_part.
+- Parser warning category.
+- Missing section classification.
+- Findings/impression word count riêng.
+- Full CT/PET/channel cache stats.
+
+##### Mức B — Cần trước khi viết báo cáo hoặc chốt clinical consistency
+
+- Duplicate report text hash leakage audit.
+- Near-duplicate text leakage audit.
+- Organ keyword matrix by split.
+- Lesion keyword matrix by split.
+- Negation-aware keyword audit.
+- Very short/very long report review.
+
+##### Mức C — Cần cho Stage 04/05/06 nghiên cứu sâu
+
+- Physical metadata availability.
+- Spacing/origin/orientation availability.
+- Voxel spacing / z-spacing.
+- SUV image calibration metadata.
+- RAG evidence leakage control.
+- XAI heatmap/ROI sanity design.
+
+#### Follow-up execution order
+
+1. Tạo audit tables Mức A để chốt data readiness chặt trước Stage 02/03.
+2. Kiểm tra Stage 03 đọc đúng `q1_generation_manifest.csv` cho supervised generation.
+3. Tạo duplicate/near-duplicate audit Mức B để tránh metric retrieval/generation bị inflated.
+4. Ghi rõ limitation của 2.5D trong mọi báo cáo Stage 02/03.
+5. Chuẩn bị Stage 04 metadata readiness trước khi thiết kế 3D dual-stream.
+
